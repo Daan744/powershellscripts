@@ -1207,6 +1207,35 @@ Function Wait-ForMailbox {
     return $false
 }
 
+Function Wait-ForExoRecipient {
+    param(
+        [string]$UserEmail,
+        [int]$MaxWaitMinutes = 15,
+        [int]$PollIntervalSeconds = 15
+    )
+
+    Write-Log "Wachten tot Exchange recipient beschikbaar is voor $UserEmail (max $MaxWaitMinutes min)..."
+    $stopwatch = [System.Diagnostics.Stopwatch]::StartNew()
+    $maxMs = $MaxWaitMinutes * 60 * 1000
+
+    while ($stopwatch.ElapsedMilliseconds -lt $maxMs) {
+        try {
+            $rcp = Get-EXORecipient -Identity $UserEmail -ErrorAction Stop
+            if ($rcp) {
+                $elapsed = [math]::Round($stopwatch.Elapsed.TotalSeconds)
+                Write-Log "Exchange recipient gevonden voor $UserEmail na $elapsed seconden" "SUCCESS"
+                return $true
+            }
+        } catch {
+            # Recipient bestaat nog niet - normaal gedrag
+        }
+        Start-Sleep -Seconds $PollIntervalSeconds
+    }
+
+    Write-Log "Exchange recipient niet gevonden na $MaxWaitMinutes minuten" "WARN"
+    return $false
+}
+
 # ============================================================================
 # 365 Selecties verwerken (groepen direct, DLs/mailboxes na mailbox check)
 # ============================================================================
@@ -1248,14 +1277,10 @@ Function Process-365Selections {
             return @{ OK = $totalOK; Failed = $totalFailed; Skipped = $totalSkipped }
         }
 
-        # Wacht tot mailbox is aangemaakt
-        Write-Log "Licentie is toegewezen, wachten tot mailbox wordt aangemaakt..."
-        $mailboxReady = Wait-ForMailbox -UserEmail $UserEmail -MaxWaitMinutes 5 -PollIntervalSeconds 15
-
-        if (-not $mailboxReady) {
-            Write-Log "Mailbox nog niet beschikbaar - DLs en shared mailboxes overgeslagen" "WARN"
-            Write-Log "Voeg DLs en shared mailboxes handmatig toe zodra de mailbox actief is" "WARN"
-            return @{ OK = $totalOK; Failed = $totalFailed; Skipped = $totalSkipped }
+        # Wacht tot recipient zichtbaar is in EXO (voor DG membership + mailbox permissies)
+        $recipientReady = Wait-ForExoRecipient -UserEmail $UserEmail -MaxWaitMinutes 15 -PollIntervalSeconds 15
+        if (-not $recipientReady) {
+            Write-Log "Recipient nog niet beschikbaar - we proberen toch DL/shared acties direct uit te voeren" "WARN"
         }
 
         # STAP 2a: Distributielijsten
@@ -1263,7 +1288,8 @@ Function Process-365Selections {
             Write-Log "=== Distributielijsten toevoegen ($($Selections.DistLists.Count)) ==="
             foreach ($dl in $Selections.DistLists) {
                 try {
-                    Add-DistributionGroupMember -Identity $dl.Mail -Member $UserEmail -ErrorAction Stop
+                    $dlIdentity = if ($dl.Mail) { $dl.Mail.ToString() } else { $dl.Id }
+                    Add-DistributionGroupMember -Identity $dlIdentity -Member $UserEmail -ErrorAction Stop
                     Write-Log "  [OK] $($dl.Name)" "SUCCESS"; $totalOK++
                 } catch {
                     if ($_.Exception.Message -like "*already a member*") {
@@ -1289,9 +1315,10 @@ Function Process-365Selections {
         if ($Selections.SharedMailboxes.Count -gt 0) {
             Write-Log "=== Shared Mailbox permissies ($($Selections.SharedMailboxes.Count)) ==="
             foreach ($mb in $Selections.SharedMailboxes) {
+                $mbIdentity = if ($mb.Mail) { $mb.Mail.ToString() } else { $mb.Id }
                 # FullAccess + AutoMapping
                 try {
-                    Add-MailboxPermission -Identity $mb.Mail -User $UserEmail -AccessRights FullAccess -AutoMapping $true -ErrorAction Stop | Out-Null
+                    Add-MailboxPermission -Identity $mbIdentity -User $UserEmail -AccessRights FullAccess -AutoMapping $true -ErrorAction Stop | Out-Null
                     Write-Log "  [OK] $($mb.Name) - FullAccess + AutoMapping" "SUCCESS"; $totalOK++
                 } catch {
                     if ($_.Exception.Message -like "*already*") {
@@ -1302,7 +1329,7 @@ Function Process-365Selections {
                 }
                 # SendAs
                 try {
-                    Add-RecipientPermission -Identity $mb.Mail -Trustee $UserEmail -AccessRights SendAs -Confirm:$false -ErrorAction Stop | Out-Null
+                    Add-RecipientPermission -Identity $mbIdentity -Trustee $UserEmail -AccessRights SendAs -Confirm:$false -ErrorAction Stop | Out-Null
                     Write-Log "  [OK] $($mb.Name) - SendAs" "SUCCESS"
                 } catch {
                     if ($_.Exception.Message -like "*already*") {
@@ -2505,7 +2532,7 @@ if ($global:EnvironmentMode -eq "OnPrem") {
                                         )
                                         if ($copyMB -eq [System.Windows.Forms.DialogResult]::Yes) {
                                             Write-Log "Shared mailbox rechten kopieren..."
-                                            $mbxReady = Wait-ForMailbox -UserEmail $emailaddress -MaxWaitMinutes 5 -PollIntervalSeconds 15
+                                            $mbxReady = Wait-ForMailbox -UserEmail $emailaddress -MaxWaitMinutes 15 -PollIntervalSeconds 15
                                             if ($mbxReady) {
                                                 foreach ($smb in $srcPermissions) {
                                                     try {
