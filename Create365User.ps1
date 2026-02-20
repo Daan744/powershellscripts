@@ -698,6 +698,15 @@ Function Show-OUSelectorForm {
 }
 
 # ============================================================================
+# OData helper (quotes escapen in filter strings)
+# ============================================================================
+Function Escape-ODataValue {
+    param([string]$Value)
+    if ($null -eq $Value) { return "" }
+    return $Value.Replace("'", "''")
+}
+
+# ============================================================================
 # STAP 2a-2: Wacht tot user in 365 verschijnt na AD Sync
 # ============================================================================
 Function Start-ADSyncAndWait {
@@ -746,22 +755,35 @@ Function Start-ADSyncAndWait {
         Start-Sleep -Seconds $PollIntervalSeconds
         $elapsed = [math]::Round($stopwatch.Elapsed.TotalSeconds)
         try {
-            # Zoek op UPN
-            $cloudUser = Get-MgUser -Filter "UserPrincipalName eq '$UserPrincipalName'" -ErrorAction SilentlyContinue
-            # Fallback: zoek op mail
+            $cloudUser = $null
+
+            # 1) Snelste/simpelste route: UPN direct als UserId
+            try {
+                $cloudUser = Get-MgUser -UserId $UserPrincipalName -ErrorAction Stop
+            } catch { }
+
+            # 2) Fallback: OData filter op UPN/mail/displayname (escaped)
             if (-not $cloudUser) {
-                $cloudUser = Get-MgUser -Filter "mail eq '$UserPrincipalName'" -ErrorAction SilentlyContinue
+                $safeUpn = Escape-ODataValue $UserPrincipalName
+                $cloudUser = Get-MgUser -Filter "UserPrincipalName eq '$safeUpn'" -ErrorAction SilentlyContinue | Select-Object -First 1
             }
-            # Fallback: zoek op displayname
+            if (-not $cloudUser) {
+                $safeMail = Escape-ODataValue $UserPrincipalName
+                $cloudUser = Get-MgUser -Filter "mail eq '$safeMail'" -ErrorAction SilentlyContinue | Select-Object -First 1
+            }
             if (-not $cloudUser -and $DisplayName) {
-                $cloudUser = Get-MgUser -Filter "displayName eq '$DisplayName'" -ErrorAction SilentlyContinue | Select-Object -First 1
+                $safeDisplayName = Escape-ODataValue $DisplayName
+                $cloudUser = Get-MgUser -Filter "displayName eq '$safeDisplayName'" -ErrorAction SilentlyContinue | Select-Object -First 1
             }
+
             if ($cloudUser) {
                 $found = $true
                 Write-Log "User gevonden in Office 365 na $elapsed seconden: $($cloudUser.UserPrincipalName) (Id: $($cloudUser.Id))" "SUCCESS"
                 break
             }
-        } catch {}
+        } catch {
+            Write-Log "  Graph lookup fout tijdens wachten: $($_.Exception.Message)" "WARN"
+        }
         Write-Log "  Wachten... ($elapsed sec)" 
     }
 
@@ -1289,7 +1311,7 @@ Function Process-365Selections {
             foreach ($dl in $Selections.DistLists) {
                 try {
                     $dlIdentity = if ($dl.Mail) { $dl.Mail.ToString() } else { $dl.Id }
-                    Add-DistributionGroupMember -Identity $dlIdentity -Member $UserEmail -ErrorAction Stop
+                    Add-DistributionGroupMember -Identity $dlIdentity -Member $UserEmail -BypassSecurityGroupManagerCheck -ErrorAction Stop
                     Write-Log "  [OK] $($dl.Name)" "SUCCESS"; $totalOK++
                 } catch {
                     if ($_.Exception.Message -like "*already a member*") {
