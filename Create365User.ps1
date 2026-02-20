@@ -706,6 +706,42 @@ Function Escape-ODataValue {
     return $Value.Replace("'", "''")
 }
 
+Function Get-LicenseDisplayName {
+    param([string]$SkuPartNumber)
+    if (-not $SkuPartNumber) { return "Onbekende licentie" }
+    switch ($SkuPartNumber.ToUpper()) {
+        'SPB' { return 'Microsoft 365 Business Premium' }
+        'O365_BUSINESS_PREMIUM' { return 'Microsoft 365 Business Standard' }
+        'O365_BUSINESS_ESSENTIALS' { return 'Microsoft 365 Business Basic' }
+        'M365_BUSINESS_BASIC' { return 'Microsoft 365 Business Basic' }
+        'M365_BUSINESS_STANDARD' { return 'Microsoft 365 Business Standard' }
+        'M365_BUSINESS_PREMIUM' { return 'Microsoft 365 Business Premium' }
+        'ENTERPRISEPACK' { return 'Office 365 E3' }
+        'ENTERPRISEPREMIUM' { return 'Office 365 E5' }
+        'STANDARDPACK' { return 'Office 365 E1' }
+        'EXCHANGESTANDARD' { return 'Exchange Online (Plan 1)' }
+        'EXCHANGEENTERPRISE' { return 'Exchange Online (Plan 2)' }
+        'EMS' { return 'Enterprise Mobility + Security E3' }
+        'EMSPREMIUM' { return 'Enterprise Mobility + Security E5' }
+        default { return $SkuPartNumber }
+    }
+}
+
+Function Format-LicenseChoice {
+    param($License)
+    $available = [int]$License.ActiveUnits - [int]$License.ConsumedUnits
+    $displayName = Get-LicenseDisplayName -SkuPartNumber $License.SkuPartNumber
+    return "$displayName [$($License.SkuPartNumber)] ($available van $($License.ActiveUnits) beschikbaar)"
+}
+
+Function Get-SkuPartFromLicenseChoice {
+    param([string]$ChoiceText)
+    if (-not $ChoiceText) { return "" }
+    $match = [regex]::Match($ChoiceText, '\[(.*?)\]')
+    if ($match.Success) { return $match.Groups[1].Value.Trim() }
+    return ($ChoiceText -split " \(")[0].Trim()
+}
+
 # ============================================================================
 # STAP 2a-2: Wacht tot user in 365 verschijnt na AD Sync
 # ============================================================================
@@ -1561,8 +1597,7 @@ if ($global:EnvironmentMode -eq "OnPrem") {
 # Bouw licentie keuze lijst
 $licenseChoices = @()
 foreach ($lic in ($global:TenantLicenses | Sort-Object SkuPartNumber)) {
-    $available = [int]$lic.ActiveUnits - [int]$lic.ConsumedUnits
-    $licenseChoices += "$($lic.SkuPartNumber) ($available van $($lic.ActiveUnits) beschikbaar)"
+    $licenseChoices += (Format-LicenseChoice -License $lic)
 }
 
 # ============================================================================
@@ -2028,7 +2063,7 @@ if ($global:EnvironmentMode -eq "CloudOnly") {
         $licenseAssigned = $false
         if ($created -and $ComboBox_License -and $ComboBox_License.CheckedItems.Count -gt 0) {
             foreach ($selLic in $ComboBox_License.CheckedItems) {
-                $skuPart = ($selLic.ToString() -split " \(")[0].Trim()
+                $skuPart = Get-SkuPartFromLicenseChoice -ChoiceText $selLic.ToString()
                 $sku = $global:TenantLicenses | Where-Object { $_.SkuPartNumber -eq $skuPart }
                 if ($sku) {
                     Write-Log "Licentie toewijzen: $skuPart (SkuId: $($sku.SkuId))"
@@ -2072,7 +2107,13 @@ if ($global:EnvironmentMode -eq "CloudOnly") {
                             continue
                         }
                         $groupName = $g.AdditionalProperties.displayName
-                        $groupTypes = $g.AdditionalProperties.groupTypes -join ","
+                        $groupTypesRaw = @($g.AdditionalProperties.groupTypes)
+                        $groupTypes = $groupTypesRaw -join ","
+                        if ($groupTypesRaw -contains "DynamicMembership") {
+                            Write-Log "  [SKIP] '$groupName' - dynamische groep kan niet handmatig gekopieerd worden" "WARN"
+                            $groupsSkipped++
+                            continue
+                        }
                         $secEnabled = $g.AdditionalProperties.securityEnabled
                         $mailEnabled = $g.AdditionalProperties.mailEnabled
                         try {
@@ -2388,8 +2429,7 @@ if ($global:EnvironmentMode -eq "OnPrem") {
                             $chkLic.Font = $TextBoxFont; $chkLic.CheckOnClick = $true
                             $chkLic.BorderStyle = [System.Windows.Forms.BorderStyle]::FixedSingle
                             foreach ($lic in ($global:TenantLicenses | Sort-Object SkuPartNumber)) {
-                                $avail = [int]$lic.ActiveUnits - [int]$lic.ConsumedUnits
-                                [void]$chkLic.Items.Add("$($lic.SkuPartNumber) ($avail van $($lic.ActiveUnits) beschikbaar)")
+                                [void]$chkLic.Items.Add((Format-LicenseChoice -License $lic))
                             }
                             [void]$licForm.Controls.Add($chkLic)
 
@@ -2427,7 +2467,7 @@ if ($global:EnvironmentMode -eq "OnPrem") {
 
                             if ($selectedLics -and $selectedLics.Count -gt 0) {
                                 foreach ($selectedLic in $selectedLics) {
-                                    $skuPart = ($selectedLic -split " \(")[0].Trim()
+                                    $skuPart = Get-SkuPartFromLicenseChoice -ChoiceText $selectedLic
                                     $sku = $global:TenantLicenses | Where-Object { $_.SkuPartNumber -eq $skuPart }
                                     if ($sku) {
                                         Write-Log "Licentie toewijzen: $skuPart (SkuId: $($sku.SkuId))"
@@ -2481,6 +2521,11 @@ if ($global:EnvironmentMode -eq "OnPrem") {
                                             $cloud365Skipped++; continue
                                         }
                                         $groupName = $g.AdditionalProperties.displayName
+                                        $groupTypesRaw = @($g.AdditionalProperties.groupTypes)
+                                        if ($groupTypesRaw -contains "DynamicMembership") {
+                                            Write-Log "  [SKIP] '$groupName' - dynamische groep kan niet handmatig gekopieerd worden" "WARN"
+                                            $cloud365Skipped++; continue
+                                        }
                                         $onPremSync = $g.AdditionalProperties.onPremisesSyncEnabled
                                         $secEnabled = $g.AdditionalProperties.securityEnabled
                                         $mailEnabled = $g.AdditionalProperties.mailEnabled
