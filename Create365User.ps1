@@ -751,27 +751,28 @@ Function Start-ADSyncAndWait {
     $maxMs = $MaxWaitMinutes * 60 * 1000
     $found = $false
 
+    $attempt = 0
     while ($stopwatch.ElapsedMilliseconds -lt $maxMs) {
-        Start-Sleep -Seconds $PollIntervalSeconds
+        $attempt++
         $elapsed = [math]::Round($stopwatch.Elapsed.TotalSeconds)
+        $remaining = [math]::Round(($maxMs - $stopwatch.ElapsedMilliseconds) / 1000)
+        if ($remaining -lt 0) { $remaining = 0 }
+        Write-Host "  [Poll $attempt] Controle op sync voor $UserPrincipalName ... ($remaining sec resterend)" -ForegroundColor Gray
+
         try {
             $cloudUser = $null
+            $safeUpn = Escape-ODataValue $UserPrincipalName
 
-            # 1) Snelste/simpelste route: UPN direct als UserId
-            try {
-                $cloudUser = Get-MgUser -UserId $UserPrincipalName -ErrorAction Stop
-            } catch { }
+            # 1) Snelle directe lookup op UPN
+            $cloudUser = Get-MgUser -UserId $UserPrincipalName -ErrorAction SilentlyContinue
 
-            # 2) Fallback: OData filter op UPN/mail/displayname (escaped)
+            # 2) Fallback met 1 gecombineerde query i.p.v. meerdere calls
             if (-not $cloudUser) {
-                $safeUpn = Escape-ODataValue $UserPrincipalName
-                $cloudUser = Get-MgUser -Filter "UserPrincipalName eq '$safeUpn'" -ErrorAction SilentlyContinue | Select-Object -First 1
+                $cloudUser = Get-MgUser -Filter "userPrincipalName eq '$safeUpn' or mail eq '$safeUpn'" -ErrorAction SilentlyContinue | Select-Object -First 1
             }
-            if (-not $cloudUser) {
-                $safeMail = Escape-ODataValue $UserPrincipalName
-                $cloudUser = Get-MgUser -Filter "mail eq '$safeMail'" -ErrorAction SilentlyContinue | Select-Object -First 1
-            }
-            if (-not $cloudUser -and $DisplayName) {
+
+            # 3) DisplayName fallback alleen af en toe (duurder/ambigu)
+            if (-not $cloudUser -and $DisplayName -and (($attempt % 3) -eq 0)) {
                 $safeDisplayName = Escape-ODataValue $DisplayName
                 $cloudUser = Get-MgUser -Filter "displayName eq '$safeDisplayName'" -ErrorAction SilentlyContinue | Select-Object -First 1
             }
@@ -784,7 +785,9 @@ Function Start-ADSyncAndWait {
         } catch {
             Write-Log "  Graph lookup fout tijdens wachten: $($_.Exception.Message)" "WARN"
         }
-        Write-Log "  Wachten... ($elapsed sec)" 
+
+        Write-Log "  Wachten... ($elapsed sec, poging $attempt)"
+        Start-Sleep -Seconds $PollIntervalSeconds
     }
 
     $stopwatch.Stop()
