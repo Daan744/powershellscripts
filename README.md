@@ -4,6 +4,12 @@ Deze repository bevat twee beheerscripts voor Microsoft 365 en Active Directory.
 
 ## Snelle links
 
+- [Open `Create365User.ps1`](https://raw.githubusercontent.com/Daan744/powershellscripts/refs/heads/main/Create365User.ps1)
+- [Open `Copy-ADUserGroupMembership.ps1`](https://raw.githubusercontent.com/Daan744/powershellscripts/refs/heads/main/Copy-ADUserGroupMembership.ps1)
+
+## Inhoud
+
+- **[`Create365User.ps1`](https://raw.githubusercontent.com/Daan744/powershellscripts/refs/heads/main/Create365User.ps1)**  
 - [Open `Create365User.ps1`](./Create365User.ps1)
 - [Open `Copy-ADUserGroupMembership.ps1`](./Copy-ADUserGroupMembership.ps1)
 
@@ -17,6 +23,7 @@ Deze repository bevat twee beheerscripts voor Microsoft 365 en Active Directory.
   - **On-Premises AD + Microsoft 365** (hybride scenario)
   - **Cloud Only (Microsoft 365 / Entra ID)**
 
+- **[`Copy-ADUserGroupMembership.ps1`](https://raw.githubusercontent.com/Daan744/powershellscripts/refs/heads/main/Copy-ADUserGroupMembership.ps1)**  
 - **[`Copy-ADUserGroupMembership.ps1`](./Copy-ADUserGroupMembership.ps1)**  
 - **`Copy-ADUserGroupMembership.ps1`**  
   CLI-script om groepslidmaatschappen van één AD-gebruiker naar een andere AD-gebruiker te kopiëren.
@@ -38,6 +45,11 @@ Afhankelijk van het gekozen script/scenario:
 - `Microsoft.Graph` (voor Graph login en M365 acties)
 - `ExchangeOnlineManagement` (waar nodig voor mailbox/licentieflow)
 
+> [`Create365User.ps1`](https://raw.githubusercontent.com/Daan744/powershellscripts/refs/heads/main/Create365User.ps1) probeert ontbrekende modules tijdens runtime te laden/installeren.
+
+---
+
+## Script 1: [`Create365User.ps1`](https://raw.githubusercontent.com/Daan744/powershellscripts/refs/heads/main/Create365User.ps1)
 > [`Create365User.ps1`](./Create365User.ps1) probeert ontbrekende modules tijdens runtime te laden/installeren.
 
 ---
@@ -69,6 +81,7 @@ powershell.exe -ExecutionPolicy Bypass -File .\Create365User.ps1
 
 ---
 
+## Script 2: [`Copy-ADUserGroupMembership.ps1`](https://raw.githubusercontent.com/Daan744/powershellscripts/refs/heads/main/Copy-ADUserGroupMembership.ps1)
 ## Script 2: [`Copy-ADUserGroupMembership.ps1`](./Copy-ADUserGroupMembership.ps1)
 ## Script 2: `Copy-ADUserGroupMembership.ps1`
 
