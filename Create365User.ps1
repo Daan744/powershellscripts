@@ -698,6 +698,51 @@ Function Show-OUSelectorForm {
 }
 
 # ============================================================================
+# OData helper (quotes escapen in filter strings)
+# ============================================================================
+Function Escape-ODataValue {
+    param([string]$Value)
+    if ($null -eq $Value) { return "" }
+    return $Value.Replace("'", "''")
+}
+
+Function Get-LicenseDisplayName {
+    param([string]$SkuPartNumber)
+    if (-not $SkuPartNumber) { return "Onbekende licentie" }
+    switch ($SkuPartNumber.ToUpper()) {
+        'SPB' { return 'Microsoft 365 Business Premium' }
+        'O365_BUSINESS_PREMIUM' { return 'Microsoft 365 Business Standard' }
+        'O365_BUSINESS_ESSENTIALS' { return 'Microsoft 365 Business Basic' }
+        'M365_BUSINESS_BASIC' { return 'Microsoft 365 Business Basic' }
+        'M365_BUSINESS_STANDARD' { return 'Microsoft 365 Business Standard' }
+        'M365_BUSINESS_PREMIUM' { return 'Microsoft 365 Business Premium' }
+        'ENTERPRISEPACK' { return 'Office 365 E3' }
+        'ENTERPRISEPREMIUM' { return 'Office 365 E5' }
+        'STANDARDPACK' { return 'Office 365 E1' }
+        'EXCHANGESTANDARD' { return 'Exchange Online (Plan 1)' }
+        'EXCHANGEENTERPRISE' { return 'Exchange Online (Plan 2)' }
+        'EMS' { return 'Enterprise Mobility + Security E3' }
+        'EMSPREMIUM' { return 'Enterprise Mobility + Security E5' }
+        default { return $SkuPartNumber }
+    }
+}
+
+Function Format-LicenseChoice {
+    param($License)
+    $available = [int]$License.ActiveUnits - [int]$License.ConsumedUnits
+    $displayName = Get-LicenseDisplayName -SkuPartNumber $License.SkuPartNumber
+    return "$displayName [$($License.SkuPartNumber)] ($available van $($License.ActiveUnits) beschikbaar)"
+}
+
+Function Get-SkuPartFromLicenseChoice {
+    param([string]$ChoiceText)
+    if (-not $ChoiceText) { return "" }
+    $match = [regex]::Match($ChoiceText, '\[(.*?)\]')
+    if ($match.Success) { return $match.Groups[1].Value.Trim() }
+    return ($ChoiceText -split " \(")[0].Trim()
+}
+
+# ============================================================================
 # STAP 2a-2: Wacht tot user in 365 verschijnt na AD Sync
 # ============================================================================
 Function Start-ADSyncAndWait {
@@ -742,27 +787,43 @@ Function Start-ADSyncAndWait {
     $maxMs = $MaxWaitMinutes * 60 * 1000
     $found = $false
 
+    $attempt = 0
     while ($stopwatch.ElapsedMilliseconds -lt $maxMs) {
-        Start-Sleep -Seconds $PollIntervalSeconds
+        $attempt++
         $elapsed = [math]::Round($stopwatch.Elapsed.TotalSeconds)
+        $remaining = [math]::Round(($maxMs - $stopwatch.ElapsedMilliseconds) / 1000)
+        if ($remaining -lt 0) { $remaining = 0 }
+        Write-Host "  [Poll $attempt] Controle op sync voor $UserPrincipalName ... ($remaining sec resterend)" -ForegroundColor Gray
+
         try {
-            # Zoek op UPN
-            $cloudUser = Get-MgUser -Filter "UserPrincipalName eq '$UserPrincipalName'" -ErrorAction SilentlyContinue
-            # Fallback: zoek op mail
+            $cloudUser = $null
+            $safeUpn = Escape-ODataValue $UserPrincipalName
+
+            # 1) Snelle directe lookup op UPN
+            $cloudUser = Get-MgUser -UserId $UserPrincipalName -ErrorAction SilentlyContinue
+
+            # 2) Fallback met 1 gecombineerde query i.p.v. meerdere calls
             if (-not $cloudUser) {
-                $cloudUser = Get-MgUser -Filter "mail eq '$UserPrincipalName'" -ErrorAction SilentlyContinue
+                $cloudUser = Get-MgUser -Filter "userPrincipalName eq '$safeUpn' or mail eq '$safeUpn'" -ErrorAction SilentlyContinue | Select-Object -First 1
             }
-            # Fallback: zoek op displayname
-            if (-not $cloudUser -and $DisplayName) {
-                $cloudUser = Get-MgUser -Filter "displayName eq '$DisplayName'" -ErrorAction SilentlyContinue | Select-Object -First 1
+
+            # 3) DisplayName fallback alleen af en toe (duurder/ambigu)
+            if (-not $cloudUser -and $DisplayName -and (($attempt % 3) -eq 0)) {
+                $safeDisplayName = Escape-ODataValue $DisplayName
+                $cloudUser = Get-MgUser -Filter "displayName eq '$safeDisplayName'" -ErrorAction SilentlyContinue | Select-Object -First 1
             }
+
             if ($cloudUser) {
                 $found = $true
                 Write-Log "User gevonden in Office 365 na $elapsed seconden: $($cloudUser.UserPrincipalName) (Id: $($cloudUser.Id))" "SUCCESS"
                 break
             }
-        } catch {}
-        Write-Log "  Wachten... ($elapsed sec)" 
+        } catch {
+            Write-Log "  Graph lookup fout tijdens wachten: $($_.Exception.Message)" "WARN"
+        }
+
+        Write-Log "  Wachten... ($elapsed sec, poging $attempt)"
+        Start-Sleep -Seconds $PollIntervalSeconds
     }
 
     $stopwatch.Stop()
@@ -1207,6 +1268,35 @@ Function Wait-ForMailbox {
     return $false
 }
 
+Function Wait-ForExoRecipient {
+    param(
+        [string]$UserEmail,
+        [int]$MaxWaitMinutes = 15,
+        [int]$PollIntervalSeconds = 15
+    )
+
+    Write-Log "Wachten tot Exchange recipient beschikbaar is voor $UserEmail (max $MaxWaitMinutes min)..."
+    $stopwatch = [System.Diagnostics.Stopwatch]::StartNew()
+    $maxMs = $MaxWaitMinutes * 60 * 1000
+
+    while ($stopwatch.ElapsedMilliseconds -lt $maxMs) {
+        try {
+            $rcp = Get-EXORecipient -Identity $UserEmail -ErrorAction Stop
+            if ($rcp) {
+                $elapsed = [math]::Round($stopwatch.Elapsed.TotalSeconds)
+                Write-Log "Exchange recipient gevonden voor $UserEmail na $elapsed seconden" "SUCCESS"
+                return $true
+            }
+        } catch {
+            # Recipient bestaat nog niet - normaal gedrag
+        }
+        Start-Sleep -Seconds $PollIntervalSeconds
+    }
+
+    Write-Log "Exchange recipient niet gevonden na $MaxWaitMinutes minuten" "WARN"
+    return $false
+}
+
 # ============================================================================
 # 365 Selecties verwerken (groepen direct, DLs/mailboxes na mailbox check)
 # ============================================================================
@@ -1248,14 +1338,10 @@ Function Process-365Selections {
             return @{ OK = $totalOK; Failed = $totalFailed; Skipped = $totalSkipped }
         }
 
-        # Wacht tot mailbox is aangemaakt
-        Write-Log "Licentie is toegewezen, wachten tot mailbox wordt aangemaakt..."
-        $mailboxReady = Wait-ForMailbox -UserEmail $UserEmail -MaxWaitMinutes 5 -PollIntervalSeconds 15
-
-        if (-not $mailboxReady) {
-            Write-Log "Mailbox nog niet beschikbaar - DLs en shared mailboxes overgeslagen" "WARN"
-            Write-Log "Voeg DLs en shared mailboxes handmatig toe zodra de mailbox actief is" "WARN"
-            return @{ OK = $totalOK; Failed = $totalFailed; Skipped = $totalSkipped }
+        # Wacht tot recipient zichtbaar is in EXO (voor DG membership + mailbox permissies)
+        $recipientReady = Wait-ForExoRecipient -UserEmail $UserEmail -MaxWaitMinutes 15 -PollIntervalSeconds 15
+        if (-not $recipientReady) {
+            Write-Log "Recipient nog niet beschikbaar - we proberen toch DL/shared acties direct uit te voeren" "WARN"
         }
 
         # STAP 2a: Distributielijsten
@@ -1263,7 +1349,8 @@ Function Process-365Selections {
             Write-Log "=== Distributielijsten toevoegen ($($Selections.DistLists.Count)) ==="
             foreach ($dl in $Selections.DistLists) {
                 try {
-                    Add-DistributionGroupMember -Identity $dl.Mail -Member $UserEmail -ErrorAction Stop
+                    $dlIdentity = if ($dl.Mail) { $dl.Mail.ToString() } else { $dl.Id }
+                    Add-DistributionGroupMember -Identity $dlIdentity -Member $UserEmail -BypassSecurityGroupManagerCheck -ErrorAction Stop
                     Write-Log "  [OK] $($dl.Name)" "SUCCESS"; $totalOK++
                 } catch {
                     if ($_.Exception.Message -like "*already a member*") {
@@ -1289,9 +1376,10 @@ Function Process-365Selections {
         if ($Selections.SharedMailboxes.Count -gt 0) {
             Write-Log "=== Shared Mailbox permissies ($($Selections.SharedMailboxes.Count)) ==="
             foreach ($mb in $Selections.SharedMailboxes) {
+                $mbIdentity = if ($mb.Mail) { $mb.Mail.ToString() } else { $mb.Id }
                 # FullAccess + AutoMapping
                 try {
-                    Add-MailboxPermission -Identity $mb.Mail -User $UserEmail -AccessRights FullAccess -AutoMapping $true -ErrorAction Stop | Out-Null
+                    Add-MailboxPermission -Identity $mbIdentity -User $UserEmail -AccessRights FullAccess -AutoMapping $true -ErrorAction Stop | Out-Null
                     Write-Log "  [OK] $($mb.Name) - FullAccess + AutoMapping" "SUCCESS"; $totalOK++
                 } catch {
                     if ($_.Exception.Message -like "*already*") {
@@ -1302,7 +1390,7 @@ Function Process-365Selections {
                 }
                 # SendAs
                 try {
-                    Add-RecipientPermission -Identity $mb.Mail -Trustee $UserEmail -AccessRights SendAs -Confirm:$false -ErrorAction Stop | Out-Null
+                    Add-RecipientPermission -Identity $mbIdentity -Trustee $UserEmail -AccessRights SendAs -Confirm:$false -ErrorAction Stop | Out-Null
                     Write-Log "  [OK] $($mb.Name) - SendAs" "SUCCESS"
                 } catch {
                     if ($_.Exception.Message -like "*already*") {
@@ -1509,8 +1597,7 @@ if ($global:EnvironmentMode -eq "OnPrem") {
 # Bouw licentie keuze lijst
 $licenseChoices = @()
 foreach ($lic in ($global:TenantLicenses | Sort-Object SkuPartNumber)) {
-    $available = [int]$lic.ActiveUnits - [int]$lic.ConsumedUnits
-    $licenseChoices += "$($lic.SkuPartNumber) ($available van $($lic.ActiveUnits) beschikbaar)"
+    $licenseChoices += (Format-LicenseChoice -License $lic)
 }
 
 # ============================================================================
@@ -1976,7 +2063,7 @@ if ($global:EnvironmentMode -eq "CloudOnly") {
         $licenseAssigned = $false
         if ($created -and $ComboBox_License -and $ComboBox_License.CheckedItems.Count -gt 0) {
             foreach ($selLic in $ComboBox_License.CheckedItems) {
-                $skuPart = ($selLic.ToString() -split " \(")[0].Trim()
+                $skuPart = Get-SkuPartFromLicenseChoice -ChoiceText $selLic.ToString()
                 $sku = $global:TenantLicenses | Where-Object { $_.SkuPartNumber -eq $skuPart }
                 if ($sku) {
                     Write-Log "Licentie toewijzen: $skuPart (SkuId: $($sku.SkuId))"
@@ -2020,7 +2107,13 @@ if ($global:EnvironmentMode -eq "CloudOnly") {
                             continue
                         }
                         $groupName = $g.AdditionalProperties.displayName
-                        $groupTypes = $g.AdditionalProperties.groupTypes -join ","
+                        $groupTypesRaw = @($g.AdditionalProperties.groupTypes)
+                        $groupTypes = $groupTypesRaw -join ","
+                        if ($groupTypesRaw -contains "DynamicMembership") {
+                            Write-Log "  [SKIP] '$groupName' - dynamische groep kan niet handmatig gekopieerd worden" "WARN"
+                            $groupsSkipped++
+                            continue
+                        }
                         $secEnabled = $g.AdditionalProperties.securityEnabled
                         $mailEnabled = $g.AdditionalProperties.mailEnabled
                         try {
@@ -2336,8 +2429,7 @@ if ($global:EnvironmentMode -eq "OnPrem") {
                             $chkLic.Font = $TextBoxFont; $chkLic.CheckOnClick = $true
                             $chkLic.BorderStyle = [System.Windows.Forms.BorderStyle]::FixedSingle
                             foreach ($lic in ($global:TenantLicenses | Sort-Object SkuPartNumber)) {
-                                $avail = [int]$lic.ActiveUnits - [int]$lic.ConsumedUnits
-                                [void]$chkLic.Items.Add("$($lic.SkuPartNumber) ($avail van $($lic.ActiveUnits) beschikbaar)")
+                                [void]$chkLic.Items.Add((Format-LicenseChoice -License $lic))
                             }
                             [void]$licForm.Controls.Add($chkLic)
 
@@ -2375,7 +2467,7 @@ if ($global:EnvironmentMode -eq "OnPrem") {
 
                             if ($selectedLics -and $selectedLics.Count -gt 0) {
                                 foreach ($selectedLic in $selectedLics) {
-                                    $skuPart = ($selectedLic -split " \(")[0].Trim()
+                                    $skuPart = Get-SkuPartFromLicenseChoice -ChoiceText $selectedLic
                                     $sku = $global:TenantLicenses | Where-Object { $_.SkuPartNumber -eq $skuPart }
                                     if ($sku) {
                                         Write-Log "Licentie toewijzen: $skuPart (SkuId: $($sku.SkuId))"
@@ -2429,6 +2521,11 @@ if ($global:EnvironmentMode -eq "OnPrem") {
                                             $cloud365Skipped++; continue
                                         }
                                         $groupName = $g.AdditionalProperties.displayName
+                                        $groupTypesRaw = @($g.AdditionalProperties.groupTypes)
+                                        if ($groupTypesRaw -contains "DynamicMembership") {
+                                            Write-Log "  [SKIP] '$groupName' - dynamische groep kan niet handmatig gekopieerd worden" "WARN"
+                                            $cloud365Skipped++; continue
+                                        }
                                         $onPremSync = $g.AdditionalProperties.onPremisesSyncEnabled
                                         $secEnabled = $g.AdditionalProperties.securityEnabled
                                         $mailEnabled = $g.AdditionalProperties.mailEnabled
@@ -2505,7 +2602,7 @@ if ($global:EnvironmentMode -eq "OnPrem") {
                                         )
                                         if ($copyMB -eq [System.Windows.Forms.DialogResult]::Yes) {
                                             Write-Log "Shared mailbox rechten kopieren..."
-                                            $mbxReady = Wait-ForMailbox -UserEmail $emailaddress -MaxWaitMinutes 5 -PollIntervalSeconds 15
+                                            $mbxReady = Wait-ForMailbox -UserEmail $emailaddress -MaxWaitMinutes 15 -PollIntervalSeconds 15
                                             if ($mbxReady) {
                                                 foreach ($smb in $srcPermissions) {
                                                     try {
